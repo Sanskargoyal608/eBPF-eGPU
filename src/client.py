@@ -1,3 +1,5 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Forces the first dedicated GPU
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -61,11 +63,11 @@ def run_network_client(client_id, server_url="http://localhost:8000"):
     client_datasets, _ = get_cifar10_datasets(num_clients=2)
     
     # Using a small subset for quick testing! (Change 100 to a larger number later)
-    my_data = torch.utils.data.Subset(client_datasets[client_id - 1], range(100))
+    my_data = torch.utils.data.Subset(client_datasets[client_id - 1], range(5000))
     
     client = FederatedClient(client_id=client_id, dataset=my_data)
     
-    rounds = 3
+    rounds = 6
     for r in range(1, rounds + 1):
         print(f"\n=== ROUND {r} ===")
         
