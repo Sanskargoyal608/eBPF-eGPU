@@ -1,3 +1,4 @@
+# src/client.py
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Forces the first dedicated GPU
 import torch
@@ -9,6 +10,7 @@ from tqdm import tqdm
 import requests
 import io
 import time
+import zlib  # Added for network payload compression
 
 class FederatedClient:
     def __init__(self, client_id, dataset, batch_size=64, lr=0.01):
@@ -24,7 +26,8 @@ class FederatedClient:
         self.model.to(self.device)
 
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
+        # ACCURACY UPGRADE: Added weight_decay to prevent overfitting
+        self.optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
 
     def set_weights(self, global_weights):
         self.model.load_state_dict(global_weights)
@@ -32,7 +35,7 @@ class FederatedClient:
     def get_weights(self):
         return {k: v.cpu() for k, v in self.model.state_dict().items()}
 
-    def train_local_model(self, epochs=1):
+    def train_local_model(self, epochs=3): # ACCURACY UPGRADE: Train for 3 epochs locally per round
         self.model.train()
         print(f"--- Client {self.client_id} starting local training for {epochs} epoch(s) on {self.device} ---")
         
@@ -62,21 +65,35 @@ def run_network_client(client_id, server_url="http://localhost:8000"):
     print(f"Client {client_id} initializing data...")
     client_datasets, _ = get_cifar10_datasets(num_clients=2)
     
-    # Using a small subset for quick testing! (Change 100 to a larger number later)
+    # 5000 images per client for realistic training
     my_data = torch.utils.data.Subset(client_datasets[client_id - 1], range(5000))
-    
     client = FederatedClient(client_id=client_id, dataset=my_data)
     
-    rounds = 6
+    rounds = 10
     for r in range(1, rounds + 1):
         print(f"\n=== ROUND {r} ===")
         
-        # 1. DOWNLOAD global weights from Server
-        print("Downloading global weights from server...")
+        # --- SYNCHRONIZATION BARRIER ---
+        print(f"Waiting for Server to reach Round {r}...")
+        while True:
+            try:
+                status_response = requests.get(f"{server_url}/status").json()
+                if status_response["current_round"] == r:
+                    print(f"Server is ready for Round {r}!")
+                    break
+                else:
+                    time.sleep(2) # Wait for slower nodes
+            except Exception as e:
+                print("Error connecting to server:", e)
+                time.sleep(2)
+
+        # 1. DOWNLOAD & DECOMPRESS global weights from Server
+        print("Downloading and decompressing global weights...")
         try:
             response = requests.get(f"{server_url}/get_weights")
             if response.status_code == 200:
-                buffer = io.BytesIO(response.content)
+                decompressed_data = zlib.decompress(response.content)
+                buffer = io.BytesIO(decompressed_data)
                 global_weights = torch.load(buffer, map_location="cpu", weights_only=True)
                 client.set_weights(global_weights)
             else:
@@ -86,25 +103,28 @@ def run_network_client(client_id, server_url="http://localhost:8000"):
             print(f"Connection error: {e}")
             break
 
-        # 2. TRAIN locally
-        client.train_local_model(epochs=1)
+        # 2. TRAIN locally (Increased to 3 Epochs for accuracy)
+        client.train_local_model(epochs=3)
 
-        # 3. UPLOAD new weights back to Server
-        print("Uploading trained weights to server...")
+        # 3. COMPRESS & UPLOAD new weights back to Server
+        print("Compressing and uploading trained weights to server...")
         local_weights = client.get_weights()
         
         buffer = io.BytesIO()
         torch.save(local_weights, buffer)
         buffer.seek(0)
         
-        files = {"file": ("weights.pth", buffer, "application/octet-stream")}
+        # Compress the 45MB payload down to ~35MB to reduce Wi-Fi ACKs
+        compressed_data = zlib.compress(buffer.getvalue(), level=3)
+        compressed_buffer = io.BytesIO(compressed_data)
+        
+        files = {"file": ("weights.pth", compressed_buffer, "application/octet-stream")}
         requests.post(f"{server_url}/upload_weights", files=files)
         
-        print("Upload complete. Waiting for server to finish FedAvg...")
-        time.sleep(5) # Wait before asking for the next round's weights
+        print(f"Round {r} upload complete. Entering sync barrier for next round...")
+        # Old time.sleep(5) completely removed!
 
 if __name__ == "__main__":
     import sys
-    # Read client ID from the command line, default to 1
     c_id = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     run_network_client(client_id=c_id)

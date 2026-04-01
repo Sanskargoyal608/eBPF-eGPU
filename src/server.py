@@ -8,6 +8,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import Response
 import uvicorn
 import io
+import zlib  # --- NEW: Added for Network Compression ---
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 
@@ -25,7 +26,8 @@ class FederatedServer:
         self.received_weights = []
         self.current_round = 1
 
-        # --- NEW: Setup Global Test Dataset ---
+        # --- Setup Global Test Dataset ---
+        print("[Server] Loading Global Test Set for Evaluation...")
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
@@ -64,24 +66,37 @@ class FederatedServer:
         self.current_round += 1
         self.received_weights = []
         
-        # --- NEW: Run evaluation after aggregation ---
+        # Run evaluation after aggregation
         self.evaluate_global_model()
 
 fl_server = FederatedServer()
+
+@app.get("/status")
+async def get_status():
+    # Tells the clients exactly what round the server is currently on
+    return {"current_round": fl_server.current_round}
 
 @app.get("/get_weights")
 async def get_weights():
     buffer = io.BytesIO()
     torch.save(fl_server.global_model.state_dict(), buffer)
-    buffer.seek(0)
-    return Response(content=buffer.read(), media_type="application/octet-stream")
+    
+    # --- NEW: Compress the Master Model before broadcasting ---
+    compressed_data = zlib.compress(buffer.getvalue(), level=3)
+    return Response(content=compressed_data, media_type="application/octet-stream")
 
 @app.post("/upload_weights")
 async def upload_weights(file: UploadFile = File(...)):
     contents = await file.read()
-    buffer = io.BytesIO(contents)
+    
+    # --- NEW: Decompress the incoming client weights ---
+    decompressed_data = zlib.decompress(contents)
+    buffer = io.BytesIO(decompressed_data)
+    
     client_state_dict = torch.load(buffer, map_location="cpu", weights_only=True)
     fl_server.received_weights.append(client_state_dict)
+    
+    print(f"[Network] Received weights from client ({len(fl_server.received_weights)}/{fl_server.expected_clients})")
     
     if len(fl_server.received_weights) == fl_server.expected_clients:
         fl_server.aggregate_weights()
