@@ -82,7 +82,7 @@ def generate_unified_timeline(net_csv, gpu_csv):
     # Prevent overlapping labels
     plt.tight_layout()
     
-    output_filename = "phase3_unified_timeline.png"
+    output_filename = "phase3_unified_timeline2.png"
     plt.savefig(output_filename, dpi=300, bbox_inches='tight')
     print(f"[✓] Dashboard generated successfully: {output_filename}")
 
